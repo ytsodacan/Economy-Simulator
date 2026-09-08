@@ -52,38 +52,80 @@ validate_identifier() {
   [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
 }
 
-install_linux_prereqs() {
-  if [[ "$(uname -s)" != "Linux" ]]; then
-    echo "[info] Skipping OS package install helper (Linux only)."
+start_postgres_redis_services() {
+  local os_name
+  os_name="$(uname -s)"
+
+  if [[ "$os_name" == "Linux" ]]; then
+    if ! require_command sudo; then
+      echo "[warn] sudo is required to start postgres/redis services on Linux."
+      return 1
+    fi
+    if require_command systemctl; then
+      sudo systemctl enable --now postgresql || true
+      sudo systemctl enable --now redis-server || true
+      return 0
+    fi
+    if require_command service; then
+      sudo service postgresql start || true
+      sudo service redis-server start || true
+    fi
     return 0
   fi
 
-  if ! require_command apt-get; then
-    echo "[info] apt-get not found; skipping automated package install."
+  if [[ "$os_name" == "Darwin" ]]; then
+    if ! require_command brew; then
+      echo "[warn] Homebrew is required to start postgres/redis services on macOS."
+      return 1
+    fi
+    brew services start postgresql@14 >/dev/null 2>&1 || brew services start postgresql >/dev/null 2>&1 || true
+    brew services start redis >/dev/null 2>&1 || true
+    return 0
+  fi
+}
+
+install_prereqs() {
+  local os_name
+  os_name="$(uname -s)"
+
+  if [[ "$os_name" == "Linux" ]]; then
+    if ! require_command apt-get; then
+      echo "[info] apt-get not found; skipping automated package install."
+      return 0
+    fi
+    if ! confirm "Install postgres + redis via apt-get (requires sudo)?" N; then
+      return 0
+    fi
+    if ! require_command sudo; then
+      echo "[warn] sudo is required for apt install."
+      return 1
+    fi
+    sudo apt-get update
+    sudo apt-get install -y postgresql postgresql-contrib redis-server
+    start_postgres_redis_services
+    echo "[ok] Completed apt-based postgres/redis install attempt."
     return 0
   fi
 
-  if ! confirm "Install postgres + redis via apt-get (requires sudo)?" N; then
+  if [[ "$os_name" == "Darwin" ]]; then
+    if ! require_command brew; then
+      echo "[warn] Homebrew is required for macOS automated install."
+      echo "[info] Install Homebrew from https://brew.sh and re-run this script."
+      return 1
+    fi
+    if ! confirm "Install postgres + redis via Homebrew?" N; then
+      return 0
+    fi
+    if ! brew list --versions postgresql@14 >/dev/null 2>&1 && ! brew list --versions postgresql >/dev/null 2>&1; then
+      brew install postgresql@14 || brew install postgresql
+    fi
+    brew list --versions redis >/dev/null 2>&1 || brew install redis
+    start_postgres_redis_services
+    echo "[ok] Completed Homebrew postgres/redis install attempt."
     return 0
   fi
 
-  if ! require_command sudo; then
-    echo "[warn] sudo is required for apt install."
-    return 1
-  fi
-
-  sudo apt-get update
-  sudo apt-get install -y postgresql postgresql-contrib redis-server
-
-  if require_command systemctl; then
-    sudo systemctl enable --now postgresql || true
-    sudo systemctl enable --now redis-server || true
-  elif require_command service; then
-    sudo service postgresql start || true
-    sudo service redis-server start || true
-  fi
-
-  echo "[ok] Completed apt-based postgres/redis install attempt."
+  echo "[info] Unsupported OS for automated package install. Please install postgres and redis manually."
 }
 
 configure_postgres_role_and_db() {
@@ -355,8 +397,8 @@ echo "Economy Simulator setup helper"
 echo "Repository root: $ROOT_DIR"
 echo
 
-echo "Step 0/6: system prerequisites (Linux/WSL helper)"
-install_linux_prereqs
+echo "Step 0/6: system prerequisites (Linux/WSL + macOS Homebrew helper)"
+install_prereqs
 
 if confirm "Create/update PostgreSQL role + database now?" N; then
   configure_postgres_role_and_db

@@ -48,18 +48,32 @@ require_command() {
 
 start_service_if_possible() {
   local service_name="$1"
+  local os_name
+  os_name="$(uname -s)"
 
   if [[ $START_SUPPORT_SERVICES -ne 1 ]]; then
     return 0
   fi
 
-  if command -v systemctl >/dev/null 2>&1; then
+  if [[ "$os_name" == "Linux" ]] && command -v systemctl >/dev/null 2>&1; then
     sudo systemctl start "$service_name" >/dev/null 2>&1 || true
     return 0
   fi
 
-  if command -v service >/dev/null 2>&1; then
+  if [[ "$os_name" == "Linux" ]] && command -v service >/dev/null 2>&1; then
     sudo service "$service_name" start >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [[ "$os_name" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+    if [[ "$service_name" == "postgresql" ]]; then
+      brew services start postgresql@14 >/dev/null 2>&1 || brew services start postgresql >/dev/null 2>&1 || true
+      return 0
+    fi
+    if [[ "$service_name" == "redis-server" ]]; then
+      brew services start redis >/dev/null 2>&1 || true
+      return 0
+    fi
   fi
 }
 
@@ -80,12 +94,16 @@ if [[ $START_SUPPORT_SERVICES -eq 1 && $(id -u) -eq 0 ]]; then
 fi
 
 if [[ $START_SUPPORT_SERVICES -eq 1 ]]; then
-  if command -v sudo >/dev/null 2>&1; then
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+    echo "[info] Attempting to start PostgreSQL and Redis via Homebrew services."
+    start_service_if_possible postgresql
+    start_service_if_possible redis-server
+  elif command -v sudo >/dev/null 2>&1; then
     echo "[info] Attempting to start PostgreSQL and Redis services."
     start_service_if_possible postgresql
     start_service_if_possible redis-server
   else
-    echo "[warn] sudo not found; skipping PostgreSQL/Redis start attempt."
+    echo "[warn] Could not auto-start PostgreSQL/Redis services on this OS."
   fi
 fi
 

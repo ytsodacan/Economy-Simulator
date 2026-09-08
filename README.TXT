@@ -1,12 +1,13 @@
 This is the source code as of December 15, 2022. Some parts have been removed due to them being irrelevant to most people (e.g. a deployment program). Although it's easy to get the basics up and running, you will probably have to make many changes for it to be completely functional.
 
-This requires Linux or Windows + WSL. It might also work on Mac, but I haven't tried.
+This requires Linux or Windows + WSL. macOS is also supported via Homebrew setup flows.
 
-Postgresql (13+) and redis are required. If you're on windows, you will need to install WSL, and then install redis with WSL.
+Postgresql (13+) and redis are required. If you're on windows, you will need to install WSL, and then install redis with WSL. On macOS, install/start them with Homebrew.
 
 Quick setup helper:
 - Run `./setup.sh` from the repository root to automate as much of this setup as possible.
 - The script will prompt before installing dependencies, running migrations, or changing config files.
+- On macOS, it can optionally install/start PostgreSQL and Redis via Homebrew.
 - It also prints the manual values you still need to set (for example DB credentials, `OwnerUserId`, and path/auth fields in `appsettings.json`).
 
 Run everything with one command:
