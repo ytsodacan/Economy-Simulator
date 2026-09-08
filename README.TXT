@@ -9,6 +9,17 @@ Quick setup helper:
 - The script will prompt before installing dependencies, running migrations, or changing config files.
 - It also prints the manual values you still need to set (for example DB credentials, `OwnerUserId`, and path/auth fields in `appsettings.json`).
 
+Run everything with one command:
+- After setup is complete, run `./run-all.sh` from the repository root.
+- This starts the website, admin builder, asset validation service, and frontend dev server.
+- Access points:
+  - Website: `http://localhost:5000/`
+  - Website admin: `http://localhost:5000/admin/`
+  - Website API proxy: `http://localhost:5000/apisite/`
+  - Website Swagger: `http://localhost:5000/swagger`
+  - Frontend: `http://localhost:3000/`
+  - Asset validator: `http://localhost:4300/`
+
 1. Create a PG user, DB, and create a file called "config.json" in services/api. Put this in it (replacing the DB, User, and Pass with your credentials):
 
 {

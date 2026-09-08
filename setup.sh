@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -u
+set -u -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="$ROOT_DIR/services/api"
@@ -10,6 +10,13 @@ WEBSITE_APPSETTINGS="$WEBSITE_DIR/appsettings.json"
 WEBSITE_APPSETTINGS_EXAMPLE="$WEBSITE_DIR/appsettings.example.json"
 FRONTEND_DIR="$ROOT_DIR/services/2016-roblox-main"
 FRONTEND_CONFIG="$FRONTEND_DIR/config.json"
+ADMIN_DIR="$ROOT_DIR/services/admin"
+ASSET_VALIDATION_DIR="$ROOT_DIR/services/AssetValidationServiceV2"
+
+DB_HOST=""
+DB_USER=""
+DB_PASSWORD=""
+DB_NAME=""
 
 confirm() {
   local prompt="$1"
@@ -36,19 +43,151 @@ require_command() {
   return 0
 }
 
-write_api_config_template() {
-  local db_host db_user db_password db_name
+sql_escape() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
 
-  read -r -p "Postgres host [127.0.0.1]: " db_host
-  db_host="${db_host:-127.0.0.1}"
+validate_identifier() {
+  local value="$1"
+  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
 
-  read -r -p "Postgres user [postgres]: " db_user
-  db_user="${db_user:-postgres}"
+install_linux_prereqs() {
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "[info] Skipping OS package install helper (Linux only)."
+    return 0
+  fi
 
-  read -r -s -p "Postgres password: " db_password
+  if ! require_command apt-get; then
+    echo "[info] apt-get not found; skipping automated package install."
+    return 0
+  fi
+
+  if ! confirm "Install postgres + redis via apt-get (requires sudo)?" N; then
+    return 0
+  fi
+
+  if ! require_command sudo; then
+    echo "[warn] sudo is required for apt install."
+    return 1
+  fi
+
+  sudo apt-get update
+  sudo apt-get install -y postgresql postgresql-contrib redis-server
+
+  if require_command systemctl; then
+    sudo systemctl enable --now postgresql || true
+    sudo systemctl enable --now redis-server || true
+  elif require_command service; then
+    sudo service postgresql start || true
+    sudo service redis-server start || true
+  fi
+
+  echo "[ok] Completed apt-based postgres/redis install attempt."
+}
+
+configure_postgres_role_and_db() {
+  local pg_admin_host pg_admin_port pg_admin_user pg_admin_db pg_admin_password
+
+  if ! require_command psql; then
+    echo "[warn] psql is required for automated Postgres role/DB creation."
+    return 1
+  fi
+
+  read -r -p "Postgres admin host [127.0.0.1]: " pg_admin_host
+  pg_admin_host="${pg_admin_host:-127.0.0.1}"
+
+  read -r -p "Postgres admin port [5432]: " pg_admin_port
+  pg_admin_port="${pg_admin_port:-5432}"
+
+  read -r -p "Postgres admin user [postgres]: " pg_admin_user
+  pg_admin_user="${pg_admin_user:-postgres}"
+
+  read -r -p "Postgres admin database [postgres]: " pg_admin_db
+  pg_admin_db="${pg_admin_db:-postgres}"
+
+  read -r -s -p "Postgres admin password (leave empty if not needed): " pg_admin_password
   echo
 
-  read -r -p "Postgres database name: " db_name
+  read -r -p "App DB host for config [127.0.0.1]: " DB_HOST
+  DB_HOST="${DB_HOST:-127.0.0.1}"
+
+  read -r -p "App DB user [postgres]: " DB_USER
+  DB_USER="${DB_USER:-postgres}"
+
+  read -r -s -p "App DB password: " DB_PASSWORD
+  echo
+
+  read -r -p "App DB name: " DB_NAME
+  if [[ -z "$DB_NAME" ]]; then
+    echo "[warn] App DB name cannot be empty."
+    return 1
+  fi
+
+  if ! validate_identifier "$DB_USER"; then
+    echo "[warn] DB user must match [A-Za-z_][A-Za-z0-9_]* for automation."
+    return 1
+  fi
+
+  if ! validate_identifier "$DB_NAME"; then
+    echo "[warn] DB name must match [A-Za-z_][A-Za-z0-9_]* for automation."
+    return 1
+  fi
+
+  local psql_cmd=(psql -h "$pg_admin_host" -p "$pg_admin_port" -U "$pg_admin_user" -d "$pg_admin_db" -v ON_ERROR_STOP=1)
+  local db_user_escaped db_password_escaped db_name_escaped
+  db_user_escaped="$(sql_escape "$DB_USER")"
+  db_password_escaped="$(sql_escape "$DB_PASSWORD")"
+  db_name_escaped="$(sql_escape "$DB_NAME")"
+
+  local role_exists
+  role_exists="$(PGPASSWORD="$pg_admin_password" "${psql_cmd[@]}" -tAc "SELECT 1 FROM pg_roles WHERE rolname='${db_user_escaped}' LIMIT 1;")"
+  if [[ "$role_exists" == "1" ]]; then
+    PGPASSWORD="$pg_admin_password" "${psql_cmd[@]}" -c "ALTER ROLE \"$DB_USER\" WITH LOGIN PASSWORD '$db_password_escaped';"
+    echo "[ok] Updated existing role: $DB_USER"
+  else
+    PGPASSWORD="$pg_admin_password" "${psql_cmd[@]}" -c "CREATE ROLE \"$DB_USER\" WITH LOGIN PASSWORD '$db_password_escaped';"
+    echo "[ok] Created role: $DB_USER"
+  fi
+
+  local db_exists
+  db_exists="$(PGPASSWORD="$pg_admin_password" "${psql_cmd[@]}" -tAc "SELECT 1 FROM pg_database WHERE datname='${db_name_escaped}' LIMIT 1;")"
+  if [[ "$db_exists" == "1" ]]; then
+    echo "[ok] Database already exists: $DB_NAME"
+  else
+    PGPASSWORD="$pg_admin_password" "${psql_cmd[@]}" -c "CREATE DATABASE \"$DB_NAME\" OWNER \"$DB_USER\";"
+    echo "[ok] Created database: $DB_NAME"
+  fi
+
+  PGPASSWORD="$pg_admin_password" "${psql_cmd[@]}" -c "GRANT ALL PRIVILEGES ON DATABASE \"$DB_NAME\" TO \"$DB_USER\";"
+}
+
+write_api_config_template() {
+  local db_host db_user db_password db_name
+  db_host="${1:-}"
+  db_user="${2:-}"
+  db_password="${3:-}"
+  db_name="${4:-}"
+
+  if [[ -z "$db_host" ]]; then
+    read -r -p "Postgres host [127.0.0.1]: " db_host
+    db_host="${db_host:-127.0.0.1}"
+  fi
+
+  if [[ -z "$db_user" ]]; then
+    read -r -p "Postgres user [postgres]: " db_user
+    db_user="${db_user:-postgres}"
+  fi
+
+  if [[ -z "$db_password" ]]; then
+    read -r -s -p "Postgres password: " db_password
+    echo
+  fi
+
+  if [[ -z "$db_name" ]]; then
+    read -r -p "Postgres database name: " db_name
+  fi
+
   if [[ -z "$db_name" ]]; then
     echo "[warn] Database name cannot be empty."
     return 1
@@ -105,6 +244,26 @@ Object.assign(data.Directories, {
 
 fs.writeFileSync(appSettingsPath, JSON.stringify(data, null, 2) + '\n');
 console.log('[ok] Updated Directories values in appsettings.json');
+NODE
+}
+
+update_website_postgres_connection() {
+  APPSETTINGS_ENV="$WEBSITE_APPSETTINGS" DB_HOST="$DB_HOST" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" DB_NAME="$DB_NAME" node <<'NODE'
+const fs = require('fs');
+
+const appSettingsPath = process.env.APPSETTINGS_ENV;
+const text = fs.readFileSync(appSettingsPath, 'utf8');
+const data = JSON.parse(text);
+
+const host = process.env.DB_HOST;
+const user = process.env.DB_USER;
+const password = process.env.DB_PASSWORD;
+const db = process.env.DB_NAME;
+
+data.Postgres = 'Host=' + host + '; Database=' + db + '; ' + 'Password=' + password + '; Username=' + user + '; Maximum Pool Size=20';
+
+fs.writeFileSync(appSettingsPath, JSON.stringify(data, null, 2) + '\n');
+console.log('[ok] Updated Postgres connection string in appsettings.json');
 NODE
 }
 
@@ -196,7 +355,17 @@ echo "Economy Simulator setup helper"
 echo "Repository root: $ROOT_DIR"
 echo
 
-echo "Step 1/5: services/api config"
+echo "Step 0/6: system prerequisites (Linux/WSL helper)"
+install_linux_prereqs
+
+if confirm "Create/update PostgreSQL role + database now?" N; then
+  configure_postgres_role_and_db
+else
+  echo "[info] Skipped automated PostgreSQL role/database creation."
+fi
+
+echo
+echo "Step 1/6: services/api config"
 if [[ -f "$API_CONFIG" ]]; then
   echo "[ok] Found $API_CONFIG"
 else
@@ -205,7 +374,11 @@ else
     if ! require_command node; then
       echo "[warn] node is required to write config.json automatically."
     else
-    write_api_config_template
+      if [[ -n "$DB_HOST" && -n "$DB_USER" && -n "$DB_NAME" ]]; then
+        write_api_config_template "$DB_HOST" "$DB_USER" "$DB_PASSWORD" "$DB_NAME"
+      else
+        write_api_config_template
+      fi
     fi
   else
     echo "[warn] Skipping config creation; migrations will fail until config.json is created."
@@ -213,7 +386,7 @@ else
 fi
 
 echo
-echo "Step 2/5: services/api dependency install + knex migrations"
+echo "Step 2/6: services/api dependency install + knex migrations"
 if require_command npm; then
   if confirm "Run npm install in services/api?" Y; then
     (cd "$API_DIR" && npm i)
@@ -229,7 +402,7 @@ else
 fi
 
 echo
-echo "Step 3/5: services/Roblox/Roblox.Website appsettings"
+echo "Step 3/6: services/Roblox/Roblox.Website appsettings"
 if [[ ! -f "$WEBSITE_APPSETTINGS" ]]; then
   if [[ -f "$WEBSITE_APPSETTINGS_EXAMPLE" ]]; then
     echo "[info] Found appsettings.example.json"
@@ -250,12 +423,17 @@ if [[ -f "$WEBSITE_APPSETTINGS" ]]; then
     update_website_directories
     echo "[ok] Backup written to $WEBSITE_APPSETTINGS.bak"
   fi
+
+  if [[ -n "$DB_HOST" && -n "$DB_USER" && -n "$DB_NAME" ]] && confirm "Set appsettings Postgres connection from DB values you entered?" Y; then
+    update_website_postgres_connection
+  fi
+
   validate_website_values
-  echo "[info] Manually verify Postgres, Redis, Urls/BaseUrl, OwnerUserId, and auth values in appsettings.json"
+  echo "[info] Manually verify Urls/BaseUrl, OwnerUserId, Redis, and auth values in appsettings.json"
 fi
 
 echo
-echo "Step 4/5: services/2016-roblox-main frontend"
+echo "Step 4/6: services/2016-roblox-main frontend"
 echo "[info] See setup guide: $FRONTEND_DIR/docs/get-started.md"
 ensure_frontend_config
 
@@ -268,26 +446,32 @@ if [[ -f "$FRONTEND_CONFIG" ]] && confirm "Set frontend apiFormat to http://loca
 fi
 
 echo
-echo "Step 5/5: manual run/start guidance"
+echo "Step 5/6: remaining dependencies"
+if require_command npm && confirm "Run npm install in services/admin?" Y; then
+  (cd "$ADMIN_DIR" && npm i)
+fi
+
+if require_command go && [[ -f "$ASSET_VALIDATION_DIR/go.mod" ]] && confirm "Run go mod download in services/AssetValidationServiceV2?" Y; then
+  (cd "$ASSET_VALIDATION_DIR" && go mod download)
+fi
+
+echo
+echo "Step 6/6: run guidance"
 cat <<GUIDE
-Next commands:
+Use ./run-all.sh to start the local stack with one command.
 
-1) Start website service:
-   cd "$WEBSITE_DIR"
-   dotnet run
+Manual values still required:
+- Database credentials/connection values if you skipped DB prompts.
+- appsettings.json OwnerUserId (set this to your own user ID after registering an account).
+- Any authorization keys or custom URLs in appsettings.json.
 
-2) Start admin builder (new terminal):
-   cd "$ROOT_DIR/services/admin"
-   npm i
-   npm run dev
-
-3) Start asset validation service (new terminal):
-   cd "$ROOT_DIR/services/AssetValidationServiceV2"
-   go run main.go
-
-4) Register an account, then set OwnerUserId in appsettings.json to your own user id and restart dotnet run.
-
-Note: services/game-server will likely still need manual edits for full game/render service compatibility.
+Accessibility after services are running:
+- Website:            http://localhost:5000/
+- Website admin:      http://localhost:5000/admin/
+- Website API proxy:  http://localhost:5000/apisite/
+- Website Swagger:    http://localhost:5000/swagger
+- Frontend (optional):http://localhost:3000/
+- Asset validator:    http://localhost:4300/
 GUIDE
 
 echo
