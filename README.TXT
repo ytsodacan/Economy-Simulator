@@ -4,6 +4,11 @@ This requires Linux or Windows + WSL. It might also work on Mac, but I haven't t
 
 Postgresql (13+) and redis are required. If you're on windows, you will need to install WSL, and then install redis with WSL.
 
+Quick setup helper:
+- Run `./setup.sh` from the repository root to automate as much of this setup as possible.
+- The script will prompt before installing dependencies, running migrations, or changing config files.
+- It also prints the manual values you still need to set (for example DB credentials, `OwnerUserId`, and path/auth fields in `appsettings.json`).
+
 1. Create a PG user, DB, and create a file called "config.json" in services/api. Put this in it (replacing the DB, User, and Pass with your credentials):
 
 {
